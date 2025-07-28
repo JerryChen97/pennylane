@@ -18,30 +18,8 @@ This submodule contains the template for Qubitization.
 import copy
 
 import pennylane as qml
-from pennylane import numpy as np
 from pennylane.operation import Operation
 from pennylane.wires import Wires
-
-
-def _positive_coeffs_hamiltonian(hamiltonian):
-    """Transforms a Hamiltonian to ensure that the coefficients are positive.
-
-    Args:
-        hamiltonian (Union[.Hamiltonian, .Sum, .Prod, .SProd, .LinearCombination]): The Hamiltonian written as a linear combination of unitaries.
-
-    Returns:
-        list(float), list(.Operation): The coefficients and unitaries of the transformed Hamiltonian.
-    """
-
-    new_unitaries = []
-
-    coeffs, ops = hamiltonian.terms()
-
-    for op, coeff in zip(ops, coeffs):
-        angle = np.pi * (0.5 * (1 - qml.math.sign(coeff)))
-        new_unitaries.append(op @ qml.GlobalPhase(angle, wires=op.wires))
-
-    return qml.math.abs(coeffs), new_unitaries
 
 
 class Qubitization(Operation):
@@ -51,7 +29,7 @@ class Qubitization(Operation):
     It is implemented with a quantum walk operator that takes a Hamiltonian as input and generates:
 
     .. math::
-        Q = (2|0\rangle\langle 0| - I) \text{Prep}_{\mathcal{H}}^{\dagger} \text{Sel}_{\mathcal{H}} \text{Prep}_{\mathcal{H}}.
+        Q =  \text{Prep}_{\mathcal{H}}^{\dagger} \text{Sel}_{\mathcal{H}} \text{Prep}_{\mathcal{H}}(2|0\rangle\langle 0| - I).
 
 
 
@@ -77,8 +55,8 @@ class Qubitization(Operation):
 
             # apply QPE
             measurements = qml.iterative_qpe(
-                         qml.Qubitization(H, control = [3,4]), ancilla = 5, iters = 3
-                         )
+                qml.Qubitization(H, control = [3,4]), aux_wire = 5, iters = 3
+            )
             return qml.probs(op = measurements)
 
         output = circuit()
@@ -92,19 +70,21 @@ class Qubitization(Operation):
         eigenvalue: 0.7
     """
 
+    grad_method = None
+
     @classmethod
     def _primitive_bind_call(cls, *args, **kwargs):
         return cls._primitive.bind(*args, **kwargs)
 
     def __init__(self, hamiltonian, control, id=None):
-        wires = hamiltonian.wires + qml.wires.Wires(control)
+        wires = qml.wires.Wires(control) + hamiltonian.wires
 
         self._hyperparameters = {
             "hamiltonian": hamiltonian,
             "control": qml.wires.Wires(control),
         }
 
-        super().__init__(wires=wires, id=id)
+        super().__init__(*hamiltonian.data, wires=wires, id=id)
 
     def _flatten(self):
         data = (self.hyperparameters["hamiltonian"],)
@@ -144,7 +124,7 @@ class Qubitization(Operation):
         return new_op
 
     @staticmethod
-    def compute_decomposition(*_, **kwargs):  # pylint: disable=arguments-differ
+    def compute_decomposition(*_, **kwargs):
         r"""Representation of the operator as a product of other operators (static method).
 
         .. math:: O = O_1 O_2 \dots O_n.
@@ -161,31 +141,23 @@ class Qubitization(Operation):
 
         **Example:**
 
-        >>> print(qml.Qubitization.compute_decomposition(hamiltonian = 0.1 * qml.Z(0), control = 1))
-        [AmplitudeEmbedding(array([1., 0.]), wires=[1]), Select(ops=(Z(0),), control=<Wires = [1]>), Adjoint(AmplitudeEmbedding(array([1., 0.]), wires=[1])), Reflection(, wires=[0])]
+        .. code-block:: python
 
+            import pennylane as qml
+            from pennylane.wires import Wires
+
+        >>> print(qml.Qubitization.compute_decomposition(hamiltonian=0.1 * qml.Z(0), control=Wires(1)))
+        [Reflection(3.141592653589793, wires=[1]), PrepSelPrep(coeffs=(0.1,), ops=(Z(0),), control=Wires([1]))]
         """
 
         hamiltonian = kwargs["hamiltonian"]
         control = kwargs["control"]
 
-        coeffs, unitaries = _positive_coeffs_hamiltonian(hamiltonian)
-
         decomp_ops = []
 
-        decomp_ops.append(
-            qml.AmplitudeEmbedding(qml.math.sqrt(coeffs), normalize=True, pad_with=0, wires=control)
-        )
+        identity = qml.prod(*[qml.Identity(wire) for wire in control])
 
-        decomp_ops.append(qml.Select(unitaries, control=control))
-        decomp_ops.append(
-            qml.adjoint(
-                qml.AmplitudeEmbedding(
-                    qml.math.sqrt(coeffs), normalize=True, pad_with=0, wires=control
-                )
-            )
-        )
-
-        decomp_ops.append(qml.Reflection(qml.Identity(control)))
+        decomp_ops.append(qml.Reflection(identity))
+        decomp_ops.append(qml.PrepSelPrep(hamiltonian, control=control))
 
         return decomp_ops

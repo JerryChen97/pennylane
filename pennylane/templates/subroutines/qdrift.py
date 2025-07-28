@@ -15,24 +15,23 @@
 import copy
 
 import pennylane as qml
+from pennylane.exceptions import QuantumFunctionError
 from pennylane.math import requires_grad, unwrap
 from pennylane.operation import Operation
-from pennylane.ops import Hamiltonian, LinearCombination, Sum
+from pennylane.ops import LinearCombination, Sum
 from pennylane.wires import Wires
 
 
 def _check_hamiltonian_type(hamiltonian):
-    if not isinstance(hamiltonian, (Hamiltonian, LinearCombination, Sum)):
-        raise TypeError(
-            f"The given operator must be a PennyLane ~.Hamiltonian or ~.Sum, got {hamiltonian}"
-        )
+    if not isinstance(hamiltonian, Sum):
+        raise TypeError(f"The given operator must be a PennyLane ~.Sum, got {hamiltonian}")
 
 
 def _extract_hamiltonian_coeffs_and_ops(hamiltonian):
     """Extract the coefficients and operators from a Hamiltonian that is
-    a ``Hamiltonian``, a ``LinearCombination`` or a ``Sum``."""
+    a ``LinearCombination`` or a ``Sum``."""
     # Note that potentially_trainable_coeffs does *not* contain all coeffs
-    if isinstance(hamiltonian, (Hamiltonian, LinearCombination)):
+    if isinstance(hamiltonian, LinearCombination):
         coeffs, ops = hamiltonian.terms()
 
     elif isinstance(hamiltonian, Sum):
@@ -106,7 +105,7 @@ class QDrift(Operation):
         seed (int): The seed for the random number generator.
 
     Raises:
-        TypeError: The ``hamiltonian`` is not of type :class:`~.Hamiltonian`, or :class:`~.Sum`
+        TypeError: The ``hamiltonian`` is not of type :class:`~.Sum`
         QuantumFunctionError: If the coefficients of ``hamiltonian`` are trainable and are used
             in a differentiable workflow.
         ValueError: If there is only one term in the Hamiltonian.
@@ -209,7 +208,7 @@ class QDrift(Operation):
             )
 
         if any(requires_grad(coeff) for coeff in coeffs):
-            raise qml.QuantumFunctionError(
+            raise QuantumFunctionError(
                 "The QDrift template currently doesn't support differentiation through the "
                 "coefficients of the input Hamiltonian."
             )
@@ -231,7 +230,7 @@ class QDrift(Operation):
         return self
 
     @staticmethod
-    def compute_decomposition(*args, **kwargs):  # pylint: disable=unused-argument
+    def compute_decomposition(*args, **kwargs):
         r"""Representation of the operator as a product of other operators (static method).
 
         .. math:: O = O_1 O_2 \dots O_n.
@@ -279,7 +278,7 @@ class QDrift(Operation):
         terms to be added to the product. For more details see `Phys. Rev. Lett. 123, 070503 (2019) <https://arxiv.org/abs/1811.08017>`_.
 
         Args:
-            hamiltonian (Union[.Hamiltonian, .Sum]): The Hamiltonian written as a sum of operations
+            hamiltonian (Sum): The Hamiltonian written as a sum of operations
             time (float): The time of evolution, namely the parameter :math:`t` in :math:`e^{-iHt}`
             n (int): An integer representing the number of exponentiated terms. default is 1
 

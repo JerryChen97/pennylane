@@ -11,10 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""This module contains functions to construct many-body observables with ``OpenFermion-PySCF``.
-"""
-# pylint: disable=too-many-arguments, too-few-public-methods, too-many-branches, unused-variable
-# pylint: disable=consider-using-generator, protected-access
+"""This module contains functions to construct many-body observables with ``OpenFermion-PySCF``."""
+# pylint: disable=too-many-arguments,unused-variable
+# pylint: disable=consider-using-generator
 import os
 
 import numpy as np
@@ -30,7 +29,7 @@ bohr_angs = 0.529177210903
 def _import_of():
     """Import openfermion and openfermionpyscf."""
     try:
-        # pylint: disable=import-outside-toplevel, unused-import, multiple-imports
+        # pylint: disable=import-outside-toplevel
         import openfermion
         import openfermionpyscf
     except ImportError as Error:
@@ -45,7 +44,7 @@ def _import_of():
 def _import_pyscf():
     """Import pyscf."""
     try:
-        # pylint: disable=import-outside-toplevel, unused-import, multiple-imports
+        # pylint: disable=import-outside-toplevel
         import pyscf
     except ImportError as Error:
         raise ImportError(
@@ -98,7 +97,7 @@ def observable(fermion_ops, init_term=0, mapping="jordan_wigner", wires=None):
 
     - The function uses tools of `OpenFermion <https://github.com/quantumlib/OpenFermion>`_
       to map the resulting fermionic Hamiltonian to the basis of Pauli matrices via the
-      Jordan-Wigner or Bravyi-Kitaev transformation. Finally, the qubit operator is converted
+      Jordan-Wigner, Parity or Bravyi-Kitaev transformation. Finally, the qubit operator is converted
       to a PennyLane observable by the function :func:`~.convert_observable`.
 
     Args:
@@ -109,7 +108,7 @@ def observable(fermion_ops, init_term=0, mapping="jordan_wigner", wires=None):
             example, this can be used to pass the nuclear-nuclear repulsion energy :math:`V_{nn}`
             which is typically included in the electronic Hamiltonian of molecules.
         mapping (str): Specifies the fermion-to-qubit mapping. Input values can
-            be ``'jordan_wigner'`` or ``'bravyi_kitaev'``.
+            be ``'jordan_wigner'``, ``'parity'``, or ``'bravyi_kitaev'``.
         wires (Wires, list, tuple, dict): Custom wire mapping used to convert the qubit operator
             to an observable measurable in a PennyLane ansatz.
             For types Wires/list/tuple, each item in the iterable represents a wire label
@@ -136,10 +135,12 @@ def observable(fermion_ops, init_term=0, mapping="jordan_wigner", wires=None):
     """
     openfermion, _ = _import_of()
 
-    if mapping.strip().lower() not in ("jordan_wigner", "bravyi_kitaev"):
+    mapping = mapping.strip().lower()
+
+    if mapping not in ("jordan_wigner", "parity", "bravyi_kitaev"):
         raise TypeError(
             f"The '{mapping}' transformation is not available. \n "
-            f"Please set 'mapping' to 'jordan_wigner' or 'bravyi_kitaev'."
+            f"Please set 'mapping' to 'jordan_wigner', 'parity', or 'bravyi_kitaev'."
         )
 
     # Initialize the FermionOperator
@@ -152,9 +153,18 @@ def observable(fermion_ops, init_term=0, mapping="jordan_wigner", wires=None):
         mb_obs += ops
 
     # Map the fermionic operator to a qubit operator
-    if mapping.strip().lower() == "bravyi_kitaev":
+    if mapping == "bravyi_kitaev":
         return qml.qchem.convert.import_operator(
             openfermion.transforms.bravyi_kitaev(mb_obs), wires=wires
+        )
+
+    if mapping == "parity":
+        qubits = openfermion.count_qubits(mb_obs)
+        if qubits == 0:
+            return 0.0 * qml.I(0)
+        binary_code = openfermion.parity_code(qubits)
+        return qml.qchem.convert.import_operator(
+            openfermion.transforms.binary_code_transform(mb_obs, binary_code), wires=wires
         )
 
     return qml.qchem.convert.import_operator(
@@ -281,7 +291,7 @@ def one_particle(matrix_elements, core=None, active=None, cutoff=1.0e-12):
 
 def two_particle(matrix_elements, core=None, active=None, cutoff=1.0e-12):
     r"""Generates the `FermionOperator <https://github.com/quantumlib/OpenFermion/blob/master/docs/
-    tutorials/intro_to_openfermion.ipynb>`_ representing a given two-particle operator
+    tutorials/intro_to_openfermion.ipynb>`__ representing a given two-particle operator
     required to build many-body qubit observables.
 
     Second quantized two-particle operators are expanded in the basis of single-particle
@@ -542,7 +552,7 @@ def dipole_of(
             mean field electronic structure problem
         core (list): indices of core orbitals
         active (list): indices of active orbitals
-        mapping (str): transformation (``'jordan_wigner'`` or ``'bravyi_kitaev'``) used to
+        mapping (str): transformation (``'jordan_wigner'``, ``'parity'``, or ``'bravyi_kitaev'``) used to
             map the fermionic operator to the Pauli basis
         cutoff (float): Cutoff value for including the matrix elements
             :math:`\langle \alpha \vert \hat{{\bf r}} \vert \beta \rangle`. The matrix elements
@@ -566,7 +576,7 @@ def dipole_of(
     >>> coordinates = np.array([0.028, 0.054, 0.0, 0.986, 1.610, 0.0, 1.855, 0.002, 0.0])
     >>> dipole_obs = dipole_of(symbols, coordinates, charge=1)
     >>> print([(h.wires) for h in dipole_obs])
-    [<Wires = [0, 1, 2, 3, 4, 5]>, <Wires = [0, 1, 2, 3, 4, 5]>, <Wires = [0]>]
+    [Wires([0, 1, 2, 3, 4, 5]), Wires([0, 1, 2, 3, 4, 5]), Wires([0])]
 
     >>> dipole_obs[0] # x-component of D
     (
@@ -600,10 +610,7 @@ def dipole_of(
 
     for i in symbols:
         if i not in atomic_numbers:
-            raise ValueError(
-                f"Currently, only first- or second-row elements of the periodic table are supported;"
-                f" got element {i}"
-            )
+            raise ValueError(f"Requested element {i} doesn't exist")
 
     hf_file = qml.qchem.meanfield(symbols, coordinates, name, charge, mult, basis, package, outpath)
 
@@ -742,14 +749,14 @@ def decompose(hf_file, mapping="jordan_wigner", core=None, active=None):
     OpenFermion tools.
 
     This function uses OpenFermion functions to build the second-quantized electronic Hamiltonian
-    of the molecule and map it to the Pauli basis using the Jordan-Wigner or Bravyi-Kitaev
+    of the molecule and map it to the Pauli basis using the Jordan-Wigner, Parity or Bravyi-Kitaev
     transformation.
 
     Args:
         hf_file (str): absolute path to the hdf5-formatted file with the
             Hartree-Fock electronic structure
         mapping (str): Specifies the transformation to map the fermionic Hamiltonian to the
-            Pauli basis. Input values can be ``'jordan_wigner'`` or ``'bravyi_kitaev'``.
+            Pauli basis. Input values can be ``'jordan_wigner'``, ``'parity'``, or ``'bravyi_kitaev'``.
         core (list): indices of core orbitals, i.e., the orbitals that are
             not correlated in the many-body wave function
         active (list): indices of active orbitals, i.e., the orbitals used to

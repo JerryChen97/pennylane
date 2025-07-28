@@ -14,6 +14,7 @@
 """
 Test base AlgorithmicError class and its associated methods.
 """
+
 import numpy as np
 
 # pylint: disable=too-few-public-methods, unused-argument
@@ -34,7 +35,7 @@ class SimpleError(AlgorithmicError):
         return self.__class__(self.error + other.error)
 
     @staticmethod
-    def get_error(approx_op, other_op):
+    def get_error(approximate_op, exact_op):
         return 0.5  # get simple error is always 0.5
 
 
@@ -58,9 +59,10 @@ class TestAlgorithmicError:
 
             class ErrorNoCombine(AlgorithmicError):
                 @staticmethod
-                def get_error(approx_op, other_op):
+                def get_error(approximate_op, exact_op):
                     return 0.5  # get simple error is always 0.5
 
+            # pylint: disable=abstract-class-instantiated
             _ = ErrorNoCombine(1.23)
 
     @pytest.mark.parametrize("err1", [1.23, 0.45, -6])
@@ -150,13 +152,15 @@ class TestSpectralNormError:
         """Test that get_error fails if the operator matrix is not defined"""
 
         class MyOp(Operation):
+
+            @property
             def name(self):
                 return self.__class__.__name__
 
         approx_op = MyOp(0)
-        exact_op = qml.RX(0.1, 1)
+        exact_op = qml.RX(0.1, 0)
 
-        with pytest.raises(qml.operation.DecompositionUndefinedError):
+        with pytest.raises(qml.operation.MatrixUndefinedError):
             SpectralNormError.get_error(approx_op, exact_op)
 
     def test_repr(self):
@@ -265,8 +269,8 @@ class TestSpecAndTracker:
     def test_computation(self):
         """Test that _compute_algo_error are adding up errors as expected."""
 
-        _ = self.circuit()
-        algo_errors = _compute_algo_error(self.circuit.qtape)
+        tape = qml.workflow.construct_tape(self.circuit)()
+        algo_errors = _compute_algo_error(tape)
         assert len(algo_errors) == 3
         assert all(error in algo_errors for error in self.errors_types)
         assert algo_errors["MultiplicativeError"].error == 0.31 * 0.24
