@@ -905,3 +905,259 @@ add_decomps(
     _integer_comparator_ge_decomposition,
     _integer_comparator_flip_geq,
 )
+
+
+class RegisterComparator(Operation):
+    r"""RegisterComparator(x_wires, y_wires, output_wire, work_wires, geq)
+    Compare two quantum registers and store the result in an output qubit.
+
+    Given two :math:`n`-qubit registers :math:`|x\rangle` and :math:`|y\rangle` encoding
+    unsigned integers in binary, and an output qubit initialized to :math:`|0\rangle`, this
+    operation flips the output qubit if :math:`x < y`:
+
+    .. math::
+        U |x\rangle |y\rangle |0\rangle = |x\rangle |y\rangle |x < y\rangle
+
+    When ``geq=True``, the comparison is reversed to :math:`x \geq y`.
+
+    The decomposition uses a Cuccaro-style ripple-carry circuit based on the observation
+    that :math:`x < y` if and only if the carry-out of :math:`\overline{x} + y` is 1.
+    This requires :math:`O(n)` gates and a single ancilla (work) qubit for :math:`n \geq 2`.
+
+    Args:
+        x_wires (Sequence[int]): wires encoding the first register :math:`|x\rangle`
+        y_wires (Sequence[int]): wires encoding the second register :math:`|y\rangle`
+        output_wire (int): the target qubit wire
+        work_wires (Sequence[int]): auxiliary wires (at least 1 required for :math:`n \geq 2`)
+        geq (bool): if ``True``, flip the output for :math:`x \geq y` instead of :math:`x < y`
+
+    Raises:
+        ValueError: if registers have different lengths or insufficient work wires
+
+    **Example**
+
+    Compare two 3-qubit registers:
+
+    >>> dev = qml.device("default.qubit", wires=8)
+    >>> @qml.qnode(dev)
+    ... def circuit():
+    ...     # Prepare |x=2⟩ = |010⟩ and |y=5⟩ = |101⟩
+    ...     qml.BasisState(np.array([0, 1, 0, 1, 0, 1, 0, 0]), wires=range(8))
+    ...     qml.RegisterComparator(
+    ...         x_wires=[0, 1, 2], y_wires=[3, 4, 5],
+    ...         output_wire=6, work_wires=[7]
+    ...     )
+    ...     return qml.probs(wires=6)
+    >>> circuit()  # output qubit is |1⟩ since 2 < 5
+    tensor([0., 1.], requires_grad=True)
+    """
+
+    is_self_inverse = True
+    num_params = 0
+    grad_method = None
+
+    def _flatten(self) -> FlatPytree:
+        hp = self.hyperparameters
+        metadata = (
+            ("x_wires", hp["x_wires"]),
+            ("y_wires", hp["y_wires"]),
+            ("output_wire", hp["output_wire"]),
+            ("work_wires", hp["work_wires"]),
+            ("geq", hp["geq"]),
+        )
+        return tuple(), (self.wires, metadata)
+
+    @classmethod
+    def _unflatten(cls, _, metadata):
+        all_wires, hyperparams = metadata
+        return cls(**dict(hyperparams))
+
+    def __init__(
+        self,
+        x_wires: WiresLike,
+        y_wires: WiresLike,
+        output_wire: int,
+        work_wires: WiresLike | None = None,
+        geq: bool = False,
+    ):
+        x_wires = Wires(x_wires)
+        y_wires = Wires(y_wires)
+        output_wire = Wires(output_wire)
+        work_wires = Wires([]) if work_wires is None else Wires(work_wires)
+
+        if len(x_wires) != len(y_wires):
+            raise ValueError(
+                f"Registers must have equal length. Got {len(x_wires)} and {len(y_wires)}."
+            )
+        if len(x_wires) == 0:
+            raise ValueError("Registers must have at least one wire.")
+        if len(x_wires) >= 2 and len(work_wires) < 1:
+            raise ValueError("At least 1 work wire is required for registers of size >= 2.")
+        if len(output_wire) != 1:
+            raise ValueError("output_wire must be a single wire.")
+
+        all_wires = x_wires + y_wires + output_wire + work_wires
+        # Wires.__add__ deduplicates, so check expected count instead.
+        expected_count = len(x_wires) + len(y_wires) + len(output_wire) + len(work_wires)
+        if len(all_wires) != expected_count:
+            raise ValueError("All wires must be distinct.")
+
+        self.hyperparameters["x_wires"] = x_wires
+        self.hyperparameters["y_wires"] = y_wires
+        self.hyperparameters["output_wire"] = output_wire
+        self.hyperparameters["work_wires"] = work_wires
+        self.hyperparameters["geq"] = geq
+
+        super().__init__(wires=all_wires)
+
+    @staticmethod
+    def compute_matrix(
+        x_wires: WiresLike,
+        y_wires: WiresLike,
+        output_wire: int,
+        work_wires: WiresLike | None = None,
+        geq: bool = False,
+    ) -> TensorLike:
+        r"""Representation of the operator as a canonical matrix.
+
+        Args:
+            x_wires: wires for the first register
+            y_wires: wires for the second register
+            output_wire: the target qubit wire
+            work_wires: auxiliary wires
+            geq: if True, compute x >= y instead of x < y
+
+        Returns:
+            tensor_like: matrix representation
+        """
+        x_wires = Wires(x_wires)
+        y_wires = Wires(y_wires)
+        n = len(x_wires)
+        work_wires = Wires([]) if work_wires is None else Wires(work_wires)
+        total_qubits = 2 * n + 1 + len(work_wires)
+        dim = 2**total_qubits
+
+        mat = np.eye(dim)
+        # The output qubit is at position 2*n in the wire ordering:
+        # [x_0, ..., x_{n-1}, y_0, ..., y_{n-1}, output, work_0, ...]
+        out_pos = 2 * n
+
+        for basis in range(dim):
+            # Extract x, y, output, work from basis
+            bits = [(basis >> (total_qubits - 1 - j)) & 1 for j in range(total_qubits)]
+            x_val = sum(bits[i] << (n - 1 - i) for i in range(n))
+            y_val = sum(bits[n + i] << (n - 1 - i) for i in range(n))
+
+            cmp_result = int(x_val >= y_val) if geq else int(x_val < y_val)
+
+            if cmp_result:
+                # Flip the output qubit
+                partner = basis ^ (1 << (total_qubits - 1 - out_pos))
+                mat[basis, basis] = 0
+                mat[partner, basis] = 1
+                mat[basis, partner] = 0  # will be set by the partner iteration
+
+        # Fix: the above double-writes. Use a cleaner approach.
+        mat = np.eye(dim)
+        for basis in range(dim):
+            bits = [(basis >> (total_qubits - 1 - j)) & 1 for j in range(total_qubits)]
+            x_val = sum(bits[i] << (n - 1 - i) for i in range(n))
+            y_val = sum(bits[n + i] << (n - 1 - i) for i in range(n))
+            cmp_result = int(x_val >= y_val) if geq else int(x_val < y_val)
+            if cmp_result:
+                partner = basis ^ (1 << (total_qubits - 1 - out_pos))
+                if basis < partner:
+                    mat[basis, basis] = 0
+                    mat[partner, partner] = 0
+                    mat[basis, partner] = 1
+                    mat[partner, basis] = 1
+
+        return mat
+
+    @staticmethod
+    def compute_decomposition(
+        x_wires: WiresLike,
+        y_wires: WiresLike,
+        output_wire: int,
+        work_wires: WiresLike | None = None,
+        geq: bool = False,
+        **kwargs,
+    ) -> list[qml.operation.Operator]:
+        r"""Decomposition into elementary gates.
+
+        Uses a Cuccaro-style ripple-carry circuit: negate x, compute the
+        carry chain of :math:`\overline{x} + y`, copy the carry-out to the
+        output qubit, then reverse the chain to restore both registers.
+
+        Args:
+            x_wires: wires for the first register
+            y_wires: wires for the second register
+            output_wire: the target qubit wire
+            work_wires: auxiliary wires (>= 1 for n >= 2)
+            geq: if True, compute x >= y instead of x < y
+
+        Returns:
+            list[Operator]: decomposition into elementary gates
+        """
+        x_wires = Wires(x_wires)
+        y_wires = Wires(y_wires)
+        output_wire = Wires(output_wire)
+        work_wires = Wires([]) if work_wires is None else Wires(work_wires)
+        n = len(x_wires)
+        ops = []
+
+        if n == 1:
+            # Single bit: x < y iff x=0 and y=1 iff NOT(x) AND y
+            ops.append(qml.X(x_wires[0]))
+            ops.append(qml.Toffoli(wires=[x_wires[0], y_wires[0], output_wire[0]]))
+            ops.append(qml.X(x_wires[0]))
+        else:
+            c = work_wires[0]
+
+            # Phase 1: Negate x register
+            for i in range(n):
+                ops.append(qml.X(x_wires[i]))
+
+            # Phase 2: Forward MAJ chain (LSB to MSB)
+            # x_wires[0] is MSB, x_wires[n-1] is LSB, so iterate in reverse
+            lsb = n - 1  # index of least significant bit
+
+            # Stage 0 (LSB): MAJ(c, x_{lsb}, y_{lsb})
+            ops.append(qml.CNOT(wires=[y_wires[lsb], x_wires[lsb]]))
+            ops.append(qml.CNOT(wires=[y_wires[lsb], c]))
+            ops.append(qml.Toffoli(wires=[x_wires[lsb], c, y_wires[lsb]]))
+
+            # Stages 1 to n-1 (toward MSB): MAJ(y_{i+1}, x_i, y_i)
+            for i in range(lsb - 1, -1, -1):
+                ops.append(qml.CNOT(wires=[y_wires[i], x_wires[i]]))
+                ops.append(qml.CNOT(wires=[y_wires[i], y_wires[i + 1]]))
+                ops.append(qml.Toffoli(wires=[x_wires[i], y_wires[i + 1], y_wires[i]]))
+
+            # Phase 3: Copy carry-out (MSB carry) to output
+            ops.append(qml.CNOT(wires=[y_wires[0], output_wire[0]]))
+
+            # Phase 4: Reverse MAJ chain (MAJ†, MSB back to LSB)
+            for i in range(0, lsb):
+                ops.append(qml.Toffoli(wires=[x_wires[i], y_wires[i + 1], y_wires[i]]))
+                ops.append(qml.CNOT(wires=[y_wires[i], y_wires[i + 1]]))
+                ops.append(qml.CNOT(wires=[y_wires[i], x_wires[i]]))
+
+            # Stage 0 reverse (LSB): MAJ†(c, x_{lsb}, y_{lsb})
+            ops.append(qml.Toffoli(wires=[x_wires[lsb], c, y_wires[lsb]]))
+            ops.append(qml.CNOT(wires=[y_wires[lsb], c]))
+            ops.append(qml.CNOT(wires=[y_wires[lsb], x_wires[lsb]]))
+
+            # Phase 5: Un-negate x register
+            for i in range(n):
+                ops.append(qml.X(x_wires[i]))
+
+        if geq:
+            ops.append(qml.X(output_wire[0]))
+
+        return ops
+
+    def adjoint(self) -> "RegisterComparator":
+        return copy(self).queue()
+
+    def pow(self, z: int) -> list["RegisterComparator"]:
+        return super().pow(z % 2)

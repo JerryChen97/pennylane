@@ -478,3 +478,290 @@ class TestIntegerComparator:
         for power in powers:
             op_pow = op.pow(power)
             assert op_pow == [] if power % 2 == 0 else [op]
+
+
+class TestRegisterComparator:
+    """Tests for the RegisterComparator"""
+
+    def test_flatten_unflatten(self):
+        """Tests the flatten and unflatten methods"""
+        op = qml.RegisterComparator(
+            x_wires=[0, 1], y_wires=[2, 3], output_wire=4, work_wires=[5], geq=False
+        )
+        data, metadata = op._flatten()
+        assert data == tuple()
+        all_wires, hp_tuple = metadata
+        hp = dict(hp_tuple)
+        assert hp["x_wires"] == Wires([0, 1])
+        assert hp["y_wires"] == Wires([2, 3])
+        assert hp["output_wire"] == Wires([4])
+        assert hp["work_wires"] == Wires([5])
+        assert hp["geq"] is False
+
+        new_op = type(op)._unflatten(*op._flatten())
+        qml.assert_equal(new_op, op)
+        assert new_op is not op
+
+    @pytest.mark.parametrize(
+        "kwargs,expected_error",
+        [
+            (
+                {"x_wires": [0, 1], "y_wires": [2], "output_wire": 3},
+                "Registers must have equal length",
+            ),
+            (
+                {"x_wires": [], "y_wires": [], "output_wire": 0},
+                "Registers must have at least one wire",
+            ),
+            (
+                {"x_wires": [0, 1], "y_wires": [2, 3], "output_wire": 4},
+                "At least 1 work wire is required",
+            ),
+            (
+                {"x_wires": [0, 1], "y_wires": [2, 3], "output_wire": 4, "work_wires": [3]},
+                "All wires must be distinct",
+            ),
+        ],
+    )
+    def test_invalid_args(self, kwargs, expected_error):
+        """Test that invalid arguments raise ValueError"""
+        with pytest.raises(ValueError, match=expected_error):
+            qml.RegisterComparator(**kwargs)
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_matrix_matches_expected_lt(self, n):
+        """Test compute_matrix for lt mode against brute force"""
+        x_wires = list(range(n))
+        y_wires = list(range(n, 2 * n))
+        output_wire = 2 * n
+        work_wires = [2 * n + 1] if n >= 2 else []
+        total = 2 * n + 1 + len(work_wires)
+
+        mat = qml.RegisterComparator.compute_matrix(
+            x_wires=x_wires,
+            y_wires=y_wires,
+            output_wire=output_wire,
+            work_wires=work_wires,
+            geq=False,
+        )
+        # Verify: for each computational basis input, the output qubit should
+        # flip iff x < y.
+        for x in range(2**n):
+            for y in range(2**n):
+                x_bits = [(x >> (n - 1 - i)) & 1 for i in range(n)]
+                y_bits = [(y >> (n - 1 - i)) & 1 for i in range(n)]
+                bits_in = x_bits + y_bits + [0] + [0] * len(work_wires)
+                idx_in = sum(b << (total - 1 - i) for i, b in enumerate(bits_in))
+                out_state = mat[:, idx_in]
+                expected_out = int(x < y)
+                bits_out = list(bits_in)
+                bits_out[2 * n] = bits_out[2 * n] ^ expected_out
+                idx_out = sum(b << (total - 1 - i) for i, b in enumerate(bits_out))
+                assert out_state[idx_out] == pytest.approx(
+                    1.0
+                ), f"n={n}, x={x}, y={y}: expected output bit {expected_out}"
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_decomposition_matches_matrix(self, n):
+        """Test that decomposition gives the same unitary as compute_matrix.
+
+        For n >= 2, the ancilla-based Cuccaro circuit is only valid when
+        the ancilla starts at |0>.  We compare the relevant columns of the
+        full unitary (those where the ancilla bit is 0).
+        """
+        x_wires = list(range(n))
+        y_wires = list(range(n, 2 * n))
+        output_wire = 2 * n
+        work_wires = [2 * n + 1] if n >= 2 else []
+        total = 2 * n + 1 + len(work_wires)
+
+        mat = qml.RegisterComparator.compute_matrix(
+            x_wires=x_wires,
+            y_wires=y_wires,
+            output_wire=output_wire,
+            work_wires=work_wires,
+            geq=False,
+        )
+
+        # Build unitary from decomposition
+        ops = qml.RegisterComparator.compute_decomposition(
+            x_wires=x_wires,
+            y_wires=y_wires,
+            output_wire=output_wire,
+            work_wires=work_wires,
+            geq=False,
+        )
+        decomp_unitary = np.eye(2**total, dtype=complex)
+        for op in ops:
+            op_mat = op.matrix()
+            full_mat = qml.math.expand_matrix(op_mat, op.wires, list(range(total)))
+            decomp_unitary = full_mat @ decomp_unitary
+
+        if not work_wires:
+            # No ancilla — unitaries should match exactly
+            assert np.allclose(mat, decomp_unitary), f"n={n}: decomp != matrix"
+        else:
+            # Compare only columns where the ancilla (last wire) is 0
+            anc_pos = total - 1
+            cols = [i for i in range(2**total) if not ((i >> (total - 1 - anc_pos)) & 1)]
+            assert np.allclose(
+                mat[:, cols], decomp_unitary[:, cols]
+            ), f"n={n}: decomp != matrix in ancilla=0 subspace"
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_decomposition_lt_all_inputs(self, n):
+        """Exhaustively test decomposition for all x,y in n-bit range"""
+        x_wires = list(range(n))
+        y_wires = list(range(n, 2 * n))
+        output_wire = 2 * n
+        work_wires = [2 * n + 1] if n >= 2 else []
+
+        ops = qml.RegisterComparator.compute_decomposition(
+            x_wires=x_wires,
+            y_wires=y_wires,
+            output_wire=output_wire,
+            work_wires=work_wires,
+            geq=False,
+        )
+        total = 2 * n + 1 + len(work_wires)
+        dev = qml.device("default.qubit", wires=total)
+
+        for x in range(2**n):
+            for y in range(2**n):
+
+                @qml.qnode(dev)
+                def circuit():
+                    for i in range(n):
+                        if (x >> (n - 1 - i)) & 1:
+                            qml.X(i)
+                    for i in range(n):
+                        if (y >> (n - 1 - i)) & 1:
+                            qml.X(n + i)
+                    for op in ops:
+                        qml.apply(op)
+                    return qml.probs(wires=output_wire)
+
+                p = circuit()[1]
+                expected = 1.0 if x < y else 0.0
+                assert p == pytest.approx(
+                    expected, abs=1e-6
+                ), f"n={n}: {x} < {y}: got P(1)={p}, expected {expected}"
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_decomposition_geq_all_inputs(self, n):
+        """Exhaustively test geq=True decomposition for all x,y"""
+        x_wires = list(range(n))
+        y_wires = list(range(n, 2 * n))
+        output_wire = 2 * n
+        work_wires = [2 * n + 1] if n >= 2 else []
+
+        ops = qml.RegisterComparator.compute_decomposition(
+            x_wires=x_wires,
+            y_wires=y_wires,
+            output_wire=output_wire,
+            work_wires=work_wires,
+            geq=True,
+        )
+        total = 2 * n + 1 + len(work_wires)
+        dev = qml.device("default.qubit", wires=total)
+
+        for x in range(2**n):
+            for y in range(2**n):
+
+                @qml.qnode(dev)
+                def circuit():
+                    for i in range(n):
+                        if (x >> (n - 1 - i)) & 1:
+                            qml.X(i)
+                    for i in range(n):
+                        if (y >> (n - 1 - i)) & 1:
+                            qml.X(n + i)
+                    for op in ops:
+                        qml.apply(op)
+                    return qml.probs(wires=output_wire)
+
+                p = circuit()[1]
+                expected = 1.0 if x >= y else 0.0
+                assert p == pytest.approx(
+                    expected, abs=1e-6
+                ), f"n={n}: {x} >= {y}: got P(1)={p}, expected {expected}"
+
+    def test_register_preservation(self):
+        """Test that input registers are restored after the operation"""
+        n = 2
+        total = 6
+        dev = qml.device("default.qubit", wires=total)
+        ops = qml.RegisterComparator.compute_decomposition(
+            x_wires=[0, 1],
+            y_wires=[2, 3],
+            output_wire=4,
+            work_wires=[5],
+            geq=False,
+        )
+
+        @qml.qnode(dev)
+        def circuit():
+            # x=1 (01), y=2 (10)
+            qml.X(1)
+            qml.X(2)
+            for op in ops:
+                qml.apply(op)
+            return qml.state()
+
+        state = circuit()
+        nonzero = np.where(np.abs(state) > 0.5)[0]
+        # Expected: |011010> = x=01, y=10, out=1, anc=0
+        assert len(nonzero) == 1
+        assert nonzero[0] == 0b011010
+
+    def test_self_inverse(self):
+        """Test that applying the operation twice restores the output qubit"""
+        dev = qml.device("default.qubit", wires=6)
+        ops = qml.RegisterComparator.compute_decomposition(
+            x_wires=[0, 1],
+            y_wires=[2, 3],
+            output_wire=4,
+            work_wires=[5],
+        )
+
+        @qml.qnode(dev)
+        def circuit():
+            qml.X(1)
+            qml.X(2)
+            for op in ops:
+                qml.apply(op)
+            for op in ops:
+                qml.apply(op)
+            return qml.state()
+
+        state = circuit()
+        nonzero = np.where(np.abs(state) > 0.5)[0]
+        # Both input registers preserved, output back to 0
+        assert len(nonzero) == 1
+        assert nonzero[0] == 0b011000  # x=01, y=10, out=0, anc=0
+
+    def test_power(self):
+        """Test pow method"""
+        op = qml.RegisterComparator(
+            x_wires=[0, 1],
+            y_wires=[2, 3],
+            output_wire=4,
+            work_wires=[5],
+        )
+        for power in range(4):
+            op_pow = op.pow(power)
+            assert op_pow == ([] if power % 2 == 0 else [op])
+
+    def test_copy(self):
+        """Test that copy creates an independent object"""
+        op = qml.RegisterComparator(
+            x_wires=[0, 1],
+            y_wires=[2, 3],
+            output_wire=4,
+            work_wires=[5],
+            geq=True,
+        )
+        op_copy = copy.copy(op)
+        assert op_copy is not op
+        assert op_copy.hyperparameters["geq"] == op.hyperparameters["geq"]
+        assert op_copy.wires == op.wires

@@ -31,7 +31,7 @@ The operations are divided into the following files:
 
 from ..identity import GlobalPhase, Identity, I
 from ..meta import Barrier, Snapshot, WireCut
-from .arithmetic_ops import QubitCarry, QubitSum, IntegerComparator
+from .arithmetic_ops import QubitCarry, QubitSum, IntegerComparator, RegisterComparator
 from .matrix_ops import QubitUnitary, DiagonalQubitUnitary, BlockEncode
 from .non_parametric_ops import (
     Hadamard,
@@ -130,6 +130,7 @@ __ops__ = {
     "BlockEncode",
     "SpecialUnitary",
     "IntegerComparator",
+    "RegisterComparator",
     "DiagonalQubitUnitary",
     "SingleExcitation",
     "SingleExcitationPlus",
