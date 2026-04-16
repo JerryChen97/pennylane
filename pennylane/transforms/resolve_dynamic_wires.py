@@ -15,8 +15,10 @@
 This submodule contains a transform for resolving dynamic wires into real wires.
 """
 
+import math
 from collections.abc import Hashable, Sequence
 
+import pennylane as qml
 from pennylane.allocation import AllocateState
 from pennylane.exceptions import AllocationError
 from pennylane.ops import measure
@@ -36,13 +38,11 @@ class _WireManager:
         self.allow_resets = allow_resets
 
     def _retrieval_method(self, state: AllocateState):
-        _retrieval_map = {AllocateState.ZERO: self._get_zeroed, AllocateState.ANY: self._get_any}
-        if state is AllocateState.PHASE_GRAD:
-            raise AllocationError(
-                "Phase-gradient allocation resolution is not yet implemented. "
-                "Concrete preparation and wire scheduling for 'phase-grad' state "
-                "will be added in a follow-up change."
-            )
+        _retrieval_map = {
+            AllocateState.ZERO: self._get_zeroed,
+            AllocateState.ANY: self._get_any,
+            AllocateState.PHASE_GRAD: self._get_phase_grad,
+        }
         return _retrieval_map[state]
 
     @property
@@ -81,14 +81,30 @@ class _WireManager:
         self._loaned[w] = AllocateState.ZERO if restored else AllocateState.ANY
         return w, []
 
+    def _get_phase_grad(self, restored: bool):
+        """Get a zeroed wire for phase-gradient preparation.
+
+        The wire is always returned to the ANY register on deallocation,
+        because even with ``restored=True`` the wire will be in the
+        phase-gradient state |nabla>, not |0>.
+        """
+        if self._zeroed:
+            w = self._zeroed.pop()
+            self._loaned[w] = AllocateState.ANY
+            return w, []
+        if self.allow_resets and self._any_state:
+            w = self._any_state.pop()
+            self._loaned[w] = AllocateState.ANY
+            m = measure(w, reset=True)
+            return w, m.measurements
+        self._add_new_wire()
+        return self._get_phase_grad(restored=restored)
+
     def get_wire(self, state: AllocateState, restored, **_kwargs):
         """Retrieve a concrete wire label from available registers.
 
-        Extra keyword arguments (e.g. ``precision``) are accepted but not yet
-        used.  This is compatibility plumbing for non-wire allocation metadata
-        passed via ``**op.hyperparameters`` from ``_new_ops``.
-        TODO: Follow-up lowering for phase-gradient allocation should remove the
-        need for generic swallowed kwargs here.
+        Extra keyword arguments (e.g. ``precision``) are accepted but
+        ignored for wire-management purposes.
         """
         if not self._zeroed and not self._any_state:
             self._add_new_wire()
@@ -105,14 +121,29 @@ def null_postprocessing(results: ResultBatch) -> Result:
     return results[0]
 
 
+def _phase_grad_prep_ops(concrete_wires):
+    """Yield H + PhaseShift gates to prepare the phase-gradient state on *concrete_wires*.
+
+    The state prepared is |nabla_n> = (1/sqrt(2^n)) sum_{m} exp(-2pi i m / 2^n) |m>,
+    following the convention used throughout the codebase (see ``rz_phase_gradient``).
+    """
+    for i, w in enumerate(concrete_wires):
+        yield qml.H(w)
+        yield qml.PhaseShift(-math.pi / 2**i, w)
+
+
 def _new_ops(operations, manager, wire_map, deallocated):
     for op in operations:
         # check name faster than isinstance
         if op.name == "Allocate":
+            concrete_wires = []
             for w in op.wires:
                 wire, ops = manager.get_wire(**op.hyperparameters)
                 yield from ops
                 wire_map[w] = wire
+                concrete_wires.append(wire)
+            if op.state is AllocateState.PHASE_GRAD:
+                yield from _phase_grad_prep_ops(concrete_wires)
         elif op.name == "Deallocate":
             for w in op.wires:
                 deallocated.add(w)

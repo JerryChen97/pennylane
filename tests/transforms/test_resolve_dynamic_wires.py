@@ -250,19 +250,46 @@ class TestReuse:
         qml.assert_equal(expected, new_tape)
 
 
-def test_phase_grad_raises_allocation_error():
-    """Test that resolving a phase-grad allocation raises AllocationError.
+def test_phase_grad_resolves_with_preparation():
+    """Test that a phase-grad allocation inserts H + PhaseShift preparation ops."""
+    import math
 
-    Phase-gradient resolution is not yet implemented; this test serves as a
-    placeholder that will be expanded once the feature lands.
-    """
     alloc = qml.allocation.Allocate.from_num_wires(
-        2, state=AllocateState.PHASE_GRAD, precision=1e-6
+        3, state=AllocateState.PHASE_GRAD, precision=1e-6
     )
-    tape = qml.tape.QuantumScript([alloc])
+    tape = qml.tape.QuantumScript(
+        [alloc, qml.allocation.Deallocate(alloc.wires)],
+    )
 
-    with pytest.raises(
-        qml.exceptions.AllocationError,
-        match="Phase-gradient allocation resolution is not yet implemented",
-    ):
-        qml.transforms.resolve_dynamic_wires(tape, min_int=0)
+    [new_tape], _ = qml.transforms.resolve_dynamic_wires(tape, min_int=0)
+
+    # 3 wires → 3×(H + PhaseShift) = 6 prep ops, no deallocation ops
+    ops = new_tape.operations
+    assert len(ops) == 6
+
+    for i in range(3):
+        assert ops[2 * i].name == "Hadamard"
+        assert ops[2 * i].wires == qml.wires.Wires(i)
+        assert ops[2 * i + 1].name == "PhaseShift"
+        assert ops[2 * i + 1].wires == qml.wires.Wires(i)
+        assert qml.math.allclose(ops[2 * i + 1].parameters[0], -math.pi / 2**i)
+
+
+def test_phase_grad_wires_return_to_any():
+    """Test that deallocated phase-grad wires go to the ANY pool, not ZERO."""
+    alloc = qml.allocation.Allocate.from_num_wires(
+        1, state=AllocateState.PHASE_GRAD, precision=1e-3, restored=True
+    )
+    dealloc = qml.allocation.Deallocate(alloc.wires)
+    # After dealloc, a second zero-state alloc needing a zeroed wire should
+    # require a reset, because the phase-grad wire went to ANY.
+    alloc2 = qml.allocation.Allocate.from_num_wires(1, state=AllocateState.ZERO)
+    dealloc2 = qml.allocation.Deallocate(alloc2.wires)
+    tape = qml.tape.QuantumScript([alloc, dealloc, alloc2, dealloc2])
+
+    [new_tape], _ = qml.transforms.resolve_dynamic_wires(tape, min_int=0)
+
+    # The second zero-state allocation reuses wire 0 from the ANY pool,
+    # which requires a mid-circuit measurement with reset.
+    op_names = [op.name for op in new_tape.operations]
+    assert "MidMeasureMP" in op_names

@@ -15,6 +15,7 @@
 Tests for the allocation module.
 """
 
+import math
 import uuid
 
 import pytest
@@ -424,23 +425,25 @@ class TestAllocatePhaseGrad:
         assert alloc_ops[0].precision == 1e-6
         assert alloc_ops[0].is_phase_gradient
 
-    def test_qml_allocate_phase_grad_device_execution_raises(self):
-        """Test that device execution of a phase-grad allocation raises AllocationError.
+    def test_qml_allocate_phase_grad_device_execution(self):
+        """Test that device execution of a phase-grad allocation prepares the state
+        and produces correct results.
 
-        Phase-gradient wire resolution is not yet implemented, so lowering to
-        device level should produce a clear error rather than silently miscompiling.
-        The inner AllocationError from resolve_dynamic_wires is wrapped by device
-        preprocessing into a higher-level message.
+        For a single-wire phase-grad allocation, the preparation is
+        H followed by PhaseShift(-pi), producing the |-> state.
+        Using a CNOT to entangle with a static wire and then undoing it
+        (restoring) leaves the static wire unchanged.
         """
 
-        @qml.qnode(qml.device("default.qubit", wires=3))
+        @qml.qnode(qml.device("default.qubit"))
         def circuit():
+            qml.H(0)
             with qml.allocate(1, state="phase-grad", precision=1e-6, restored=True) as wires:
-                qml.X(wires[0])
+                qml.CNOT((wires[0], 0))
+                qml.CNOT((wires[0], 0))
             return qml.expval(qml.Z(0))
 
-        with pytest.raises(qml.exceptions.AllocationError):
-            circuit()
+        assert qml.math.allclose(circuit(), 0, atol=1e-6)
 
     def test_allocate_phase_grad_returns_register(self):
         """Test that allocate with state='phase-grad' returns a DynamicRegister."""
@@ -576,3 +579,79 @@ class TestPhaseGradCaptureIntegration:
             "restored": False,
             "precision": 0.01,
         }
+
+
+# ---- Phase-gradient system test ----
+
+
+class TestPhaseGradSystem:
+    """End-to-end system tests verifying the phase-gradient allocation
+    pipeline: allocate → resolve_dynamic_wires → device execution."""
+
+    def test_single_wire_bloch_vector(self):
+        """Validate the Bloch vector of a single-wire phase-gradient state.
+
+        Wire 0 receives H + PhaseShift(-π), producing |−⟩.
+        Expected: ⟨X⟩ = −1, ⟨Y⟩ = 0, ⟨Z⟩ = 0.
+        """
+
+        @qml.qnode(qml.device("default.qubit"))
+        def circuit():
+            pg = allocate(1, state="phase-grad", precision=1e-3)
+            return qml.expval(qml.X(pg[0])), qml.expval(qml.Y(pg[0])), qml.expval(qml.Z(pg[0]))
+
+        x, y, z = circuit()
+        assert qml.math.allclose(x, -1, atol=1e-6)
+        assert qml.math.allclose(y, 0, atol=1e-6)
+        assert qml.math.allclose(z, 0, atol=1e-6)
+
+    def test_multi_wire_bloch_vectors(self):
+        """Validate Bloch coordinates for a 3-wire phase-gradient register.
+
+        Wire i receives H + PhaseShift(-π/2^i), giving state
+        (|0⟩ + exp(-iπ/2^i)|1⟩)/√2 with:
+            ⟨X⟩ = cos(π/2^i),  ⟨Y⟩ = sin(-π/2^i),  ⟨Z⟩ = 0.
+        """
+
+        @qml.qnode(qml.device("default.qubit"))
+        def circuit():
+            pg = allocate(3, state="phase-grad", precision=1e-3)
+            return [qml.expval(qml.X(pg[i])) for i in range(3)]
+
+        results = circuit()
+        for i in range(3):
+            expected = math.cos(math.pi / 2**i)
+            assert qml.math.allclose(
+                results[i], expected, atol=1e-6
+            ), f"Wire {i}: ⟨X⟩ = {results[i]}, expected {expected}"
+
+    def test_device_level_drawing(self):
+        """Verify that device-level drawing shows preparation gates, not Allocate ops."""
+
+        @qml.qnode(qml.device("default.qubit"))
+        def circuit():
+            with allocate(2, state="phase-grad", precision=1e-3, restored=True) as pg:
+                qml.CNOT((pg[0], pg[1]))
+                qml.CNOT((pg[0], pg[1]))
+            return qml.expval(qml.Z(0))
+
+        drawing = qml.draw(circuit, level="device")()
+        assert "H" in drawing
+        assert "Rϕ" in drawing
+        assert "Allocate" not in drawing
+
+    def test_phase_grad_with_static_wires(self, seed):
+        """Integration: a circuit mixing static and phase-grad wires produces correct results."""
+
+        @qml.qnode(qml.device("default.qubit", seed=seed), mcm_method="tree-traversal")
+        def circuit():
+            qml.H(0)
+            # Allocate phase-grad wire, use it as control for CZ with static wire 0
+            with allocate(1, state="phase-grad", precision=1e-3, restored=False) as pg:
+                qml.CZ((pg[0], 0))
+                # Phase-grad wire 0 is |−⟩; CZ(|−⟩, |+⟩) flips the target phase
+                qml.CZ((pg[0], 0))  # undo
+            return qml.expval(qml.Z(0))
+
+        # H|0⟩ → |+⟩, CZ+CZ cancels, so ⟨Z⟩ = 0
+        assert qml.math.allclose(circuit(), 0, atol=1e-6)

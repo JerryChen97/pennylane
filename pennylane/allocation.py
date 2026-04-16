@@ -242,12 +242,9 @@ def allocate(
             Specifies the requested initial state for the allocated wires.
             ``"zero"`` allocates wires in the all-zeros state,
             ``"any"`` allows any arbitrary initial state, and
-            ``"phase-grad"`` requests a phase-gradient state.
+            ``"phase-grad"`` requests a phase-gradient state
+            :math:`|\\nabla_n\\rangle = \\frac{1}{\\sqrt{2^n}} \\sum_{m=0}^{2^n-1} e^{-2\\pi i m / 2^n} |m\\rangle`.
             The default value is ``state="zero"``.
-
-            .. note::
-                ``"phase-grad"`` is experimental. Concrete preparation and lowering is
-                deferred to a follow-up change.
 
         restored (bool):
             Whether or not the dynamically allocated wires are returned to the same state they
