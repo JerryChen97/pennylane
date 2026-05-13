@@ -133,7 +133,13 @@ def _get_batch_shape(non_const_args, non_const_batch_dims):
 
 
 def _get_shapes_for(*measurements, shots=None, num_device_wires=0, batch_shape=()):
-    """Calculate the abstract output shapes for the given measurements."""
+    """Calculate the abstract output shapes for the given measurements.
+
+    Handles three categories of QNode return values:
+    - MeasurementProcess outputs (AbstractMeasurement avals with abstract_eval)
+    - Mid-circuit measurement (MCM) values (ShapedArray int/bool scalars)
+    - Classical constants (Literals or ShapedArray values without abstract_eval)
+    """
 
     if jax.config.jax_enable_x64:
         dtype_map = {
@@ -155,25 +161,32 @@ def _get_shapes_for(*measurements, shots=None, num_device_wires=0, batch_shape=(
     for s in shots:
         for m in measurements:
             s = s.val if isinstance(s, jax.extend.core.Literal) else s
-            try:
+
+            if hasattr(m.aval, "abstract_eval"):
+                # Standard measurement process (expval, sample, counts, etc.)
                 shape, dtype = m.aval.abstract_eval(shots=s, num_device_wires=num_device_wires)
-            except AttributeError as e:
-                raise ValueError(
-                    "Only Measurement Processes can be returned from QNode's. Got returned"
-                    f" value of abstract type {m.aval}."
-                    "\nNote that raw mid circuit measurements can no longer be returned with"
-                    " Catalyst when capture is turned on. Please use qp.sample(mcm) instead for accurate results."
-                ) from e
-            if all(isinstance(si, int) for si in shape):
-                aval_type = jax.core.ShapedArray
+                if all(isinstance(si, int) for si in shape):
+                    aval_type = jax.core.ShapedArray
+                else:
+                    aval_type = jax.core.DShapedArray
+                    if not jax.config.jax_dynamic_shapes:
+                        raise ValueError(
+                            "Returning arrays with a dynamic shape requires setting jax.config.update('jax_dynamic_shapes', True)"
+                        )
+                dtype = jax.numpy.dtype(dtype_map.get(dtype, dtype))
+                shapes.append(aval_type(batch_shape + shape, dtype))
             else:
-                aval_type = jax.core.DShapedArray
-                if not jax.config.jax_dynamic_shapes:
-                    raise ValueError(
-                        "Returning arrays with a dynamic shape requires setting jax.config.update('jax_dynamic_shapes', True)"
-                    )
-            dtype = jax.numpy.dtype(dtype_map.get(dtype, dtype))
-            shapes.append(aval_type(batch_shape + shape, dtype))
+                # Non-measurement return: MCM value, classical constant, or derived value.
+                # Pass through using the existing abstract value's shape and dtype.
+                aval = m.aval
+                shape = getattr(aval, "shape", ())
+                dtype = getattr(aval, "dtype", jax.numpy.int64)
+                if all(isinstance(si, int) for si in shape):
+                    aval_type = jax.core.ShapedArray
+                else:
+                    aval_type = jax.core.DShapedArray
+                dtype = jax.numpy.dtype(dtype_map.get(dtype, dtype))
+                shapes.append(aval_type(batch_shape + shape, dtype))
     return shapes
 
 
