@@ -102,6 +102,10 @@ def _get_abstract_operator() -> type:
             return qp.prod(*args)
 
         @staticmethod
+        def _rmatmul(self, other):
+            return qp.prod(other, self)
+
+        @staticmethod
         def _mul(a, b):
             return qp.s_prod(b, a)
 

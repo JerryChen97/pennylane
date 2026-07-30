@@ -52,6 +52,27 @@ def test_abstract_operator():
     # arithmetic dunders integration tested
 
 
+def test_abstract_operator_rmatmul():
+    """Test that operator @ works on Prod operands inside change_op_basis during tracing.
+
+    The _ry_to_rz_cliff decomposition rule passes Prod operators (e.g. H @ S†) to
+    change_op_basis. Internally this triggers _rmatmul on AbstractOperator.
+    Without _rmatmul defined, this raises AttributeError.
+    """
+
+    def f():
+        w = jax.numpy.array(0, dtype=int)
+        qp.change_op_basis(
+            qp.Hadamard(w) @ qp.adjoint(qp.S(w)),
+            qp.RZ(0.5, w),
+            qp.S(w) @ qp.Hadamard(w),
+        )
+
+    # Should not raise: "'AbstractOperator' object has no attribute '_rmatmul'"
+    jaxpr = jax.make_jaxpr(f)()
+    assert len(jaxpr.eqns) > 0
+
+
 def test_operators_constructed_when_plxpr_enabled():
     """Test that normal operators can still be constructed when plxpr is enabled."""
 
